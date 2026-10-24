@@ -108,20 +108,38 @@ jobs:
           IPA_URL="${{ github.event.inputs.ipa_url || 'https://github.com/prateek147/DVIA-v2/releases/download/v2.0/DVIA-v2-swift.ipa' }}"
           curl -L -o DVIA-v2.ipa "$IPA_URL"
 
+      - name: List available simulators
+        run: xcrun simctl list devices available
+
       - name: Boot iOS Simulator
-        uses: futureware-tech/simulator-action@v3
-        with:
-          model: "iPhone 15"
-          os: iOS
-          os_version: ">=17"
-          erase_before_boot: true
+        run: |
+          # Взять первый доступный iPhone из любого iOS runtime
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          for runtime, devices in d['devices'].items():
+              if 'iOS' in runtime:
+                  for dev in devices:
+                      if 'iPhone' in dev.get('name','') and dev.get('isAvailable', False):
+                          print(dev['udid'])
+                          exit()
+          ")
+          if [ -z "$UDID" ]; then
+            echo "ERROR: No iPhone simulator found!"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Booting simulator UDID: $UDID"
+          xcrun simctl boot "$UDID" || true
+          # Ждём когда загрузится
+          until xcrun simctl list devices | grep "$UDID" | grep -q "Booted"; do sleep 3; done
+          echo "SIMULATOR_UDID=$UDID" >> $GITHUB_ENV
+          echo "Simulator ready: $UDID"
 
       - name: Get simulator UDID
         run: |
-          UDID=$(xcrun simctl list devices | grep Booted | grep -oE '[A-F0-9-]{36}' | head -1)
-          echo "SIMULATOR_UDID=$UDID" >> $GITHUB_ENV
-          echo "Simulator UDID: $UDID"
-          frida-ps -D "$UDID" | head -10
+          echo "Using UDID: $SIMULATOR_UDID"
+          frida-ps -D "$SIMULATOR_UDID" | head -10
 
       - name: Install DVIA-v2 on simulator
         run: |
