@@ -197,21 +197,21 @@ jobs:
           echo "Attaching Frida to: $TARGET_APP on $SIM_UDID"
 
           timeout 25 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
-            -l scripts/frida-ios/ios/dump/network.js \
+            -l scripts/frida-ios/dump/network.js \
             -e "setTimeout(function(){ Process.terminate(); }, 18000);" \
             > reports/frida-network.txt 2>&1 || true
           echo "--- Network hook ---"
           cat reports/frida-network.txt
 
           timeout 20 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
-            -l scripts/frida-ios/ios/dump/keychain.js \
+            -l scripts/frida-ios/dump/keychain.js \
             -e "setTimeout(function(){ Process.terminate(); }, 12000);" \
             > reports/frida-keychain.txt 2>&1 || true
           echo "--- Keychain hook ---"
           cat reports/frida-keychain.txt | head -30
 
           timeout 20 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
-            -l scripts/frida-ios/ios/dump/nsuserdefaults.js \
+            -l scripts/frida-ios/dump/nsuserdefaults.js \
             -e "setTimeout(function(){ Process.terminate(); }, 12000);" \
             > reports/frida-nsuserdefaults.txt 2>&1 || true
           echo "--- NSUserDefaults hook ---"
@@ -220,7 +220,12 @@ jobs:
       - name: Objection keychain dump
         run: |
           SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
-          objection -S "$SIM_UDID" -g "$TARGET_APP" \
+          # Убедиться что приложение ещё запущено
+          frida-ps -D "$SIM_UDID" | grep -i "$TARGET_APP" || \
+            xcrun simctl launch "$SIM_UDID" com.highaltitudehacks.DVIAswiftv2 2>/dev/null || \
+            xcrun simctl openurl "$SIM_UDID" "https://example.com" 2>/dev/null || true
+          sleep 3
+          objection -S "$SIM_UDID" -n "$TARGET_APP" \
             run "ios keychain dump" > reports/objection-keychain.txt 2>&1 || true
           cat reports/objection-keychain.txt | head -20
 
