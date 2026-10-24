@@ -103,39 +103,6 @@ jobs:
           python3 -m pip install frida frida-tools objection --break-system-packages 2>/dev/null || \
           pip3 install frida frida-tools objection
 
-      - name: Clone DVIA-v2 source
-        run: |
-          git clone --depth 1 https://github.com/prateek147/DVIA-v2.git "$GITHUB_WORKSPACE/DVIA-v2"
-          ls "$GITHUB_WORKSPACE/DVIA-v2/"
-
-      - name: Install CocoaPods dependencies
-        working-directory: DVIA-v2/DVIA-v2
-        run: |
-          ls -la
-          pod install
-
-      - name: Build DVIA-v2 for iOS Simulator
-        run: |
-          SIM_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
-          echo "Building for simulator: $SIM_UDID"
-          cd "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2"
-          # Показать доступные схемы
-          xcodebuild -workspace DVIA-v2.xcworkspace -list 2>&1
-          # Собрать
-          xcodebuild \
-            -workspace DVIA-v2.xcworkspace \
-            -scheme DVIA-v2 \
-            -destination "platform=iOS Simulator,id=$SIM_UDID" \
-            -derivedDataPath "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            SWIFT_VERSION=5 \
-            build 2>&1 | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED|warning: Swift" | tail -20 || true
-          find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -3
-
-      - name: List available simulators
-        run: xcrun simctl list devices available
-
       - name: Boot iOS Simulator
         run: |
           UDID=$(xcrun simctl list devices available -j | python3 -c "
@@ -150,28 +117,55 @@ jobs:
           ")
           if [ -z "$UDID" ]; then
             echo "ERROR: No iPhone simulator found!"
+            xcrun simctl list devices available
             exit 1
           fi
           echo "Booting UDID: $UDID"
           xcrun simctl boot "$UDID" || true
           until xcrun simctl list devices | grep "$UDID" | grep -q "Booted"; do sleep 3; done
-          # Сохранить UDID в файл и env (для шагов с working-directory)
-          echo "$UDID" > $GITHUB_WORKSPACE/sim_udid.txt
+          echo "$UDID" > "$GITHUB_WORKSPACE/sim_udid.txt"
           echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
           echo "Simulator ready: $UDID"
+          cat "$GITHUB_WORKSPACE/sim_udid.txt"
+
+      - name: Clone DVIA-v2 source
+        run: |
+          git clone --depth 1 https://github.com/prateek147/DVIA-v2.git "$GITHUB_WORKSPACE/DVIA-v2"
+          ls "$GITHUB_WORKSPACE/DVIA-v2/"
+
+      - name: Install CocoaPods dependencies
+        working-directory: DVIA-v2/DVIA-v2
+        run: |
+          ls -la
+          pod install
+
+      - name: Build DVIA-v2 for iOS Simulator
+        run: |
+          SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
+          echo "Building for simulator: $SIM_UDID"
+          cd "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2"
+          xcodebuild -workspace DVIA-v2.xcworkspace -list 2>&1
+          xcodebuild \
+            -workspace DVIA-v2.xcworkspace \
+            -scheme DVIA-v2 \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
+            -derivedDataPath "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            SWIFT_VERSION=5 \
+            build 2>&1 | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED|warning: Swift" | tail -20 || true
+          find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -3
 
       - name: Verify Frida sees simulator
         run: |
-          SIMULATOR_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
-          echo "SIMULATOR_UDID=$SIMULATOR_UDID" >> "$GITHUB_ENV"
-          echo "Using UDID: $SIMULATOR_UDID"
-          frida-ps -D "$SIMULATOR_UDID" | head -15
+          SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
+          echo "Using UDID: $SIM_UDID"
+          frida-ps -D "$SIM_UDID" | head -15
 
       - name: Install and launch app on simulator
         run: |
-          SIM_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
+          SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
           mkdir -p reports
-          # Попытка 1: DVIA-v2 из сборки
           APP_PATH=$(find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" 2>/dev/null | head -1)
           if [ -n "$APP_PATH" ]; then
             echo "Installing DVIA-v2 from: $APP_PATH"
@@ -181,20 +175,18 @@ jobs:
             TARGET_APP="DVIA-v2"
           else
             echo "DVIA-v2 build not found, using MobileSafari for Frida demo"
-            # Safari всегда есть на симуляторе
             xcrun simctl openurl "$SIM_UDID" "https://example.com" || true
             sleep 5
             TARGET_APP="MobileSafari"
           fi
           echo "TARGET_APP=$TARGET_APP" >> "$GITHUB_ENV"
-          echo "SIM_UDID=$SIM_UDID" >> "$GITHUB_ENV"
           frida-ps -D "$SIM_UDID" | grep -i "$TARGET_APP" || frida-ps -D "$SIM_UDID" | head -15
 
       - name: Frida hooks (network + keychain + nsuserdefaults)
         run: |
-          SIM_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
+          SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
           echo "Attaching Frida to: $TARGET_APP on $SIM_UDID"
-          # Network hook
+          mkdir -p reports
           timeout 25 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
             -l scripts/frida-ios/ios/dump/network.js \
             -e "setTimeout(function(){ Process.terminate(); }, 18000);" \
@@ -202,7 +194,6 @@ jobs:
           echo "--- Network hook output ---"
           cat reports/frida-network.txt
 
-          # Keychain dump
           timeout 20 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
             -l scripts/frida-ios/ios/dump/keychain.js \
             -e "setTimeout(function(){ Process.terminate(); }, 12000);" \
@@ -210,7 +201,6 @@ jobs:
           echo "--- Keychain hook output ---"
           cat reports/frida-keychain.txt | head -30
 
-          # NSUserDefaults
           timeout 20 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
             -l scripts/frida-ios/ios/dump/nsuserdefaults.js \
             -e "setTimeout(function(){ Process.terminate(); }, 12000);" \
@@ -218,7 +208,7 @@ jobs:
 
       - name: Objection keychain dump
         run: |
-          SIM_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
+          SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
           objection -d "$SIM_UDID" -g "$TARGET_APP" \
             run "ios keychain dump" > reports/objection-keychain.txt 2>&1 || true
           cat reports/objection-keychain.txt | head -20
