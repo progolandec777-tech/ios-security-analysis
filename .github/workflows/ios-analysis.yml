@@ -117,13 +117,19 @@ jobs:
       - name: Build DVIA-v2 for iOS Simulator
         working-directory: DVIA-v2/DVIA-v2
         run: |
+          # Показать доступные схемы
+          xcodebuild -workspace DVIA-v2.xcworkspace -list 2>&1 | head -20
+          # Собрать с отключённой подписью и совместимостью Swift
           xcodebuild \
             -workspace DVIA-v2.xcworkspace \
             -scheme DVIA-v2 \
             -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
             -derivedDataPath "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
-            build 2>&1 | tail -15
+            CODE_SIGNING_REQUIRED=NO \
+            SWIFT_VERSION=5 \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            build 2>&1 | grep -E "error:|BUILD|warning: Swift|FAILED|Compiling" | tail -30 || true
           find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -3
 
       - name: List available simulators
