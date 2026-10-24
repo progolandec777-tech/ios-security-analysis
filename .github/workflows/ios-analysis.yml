@@ -100,6 +100,7 @@ jobs:
 
       - name: Install Frida & tools
         run: |
+          brew install coreutils
           python3 -m pip install frida frida-tools objection --break-system-packages 2>/dev/null || \
           pip3 install frida frida-tools objection
 
@@ -190,32 +191,36 @@ jobs:
 
       - name: Frida hooks (network + keychain + nsuserdefaults)
         run: |
+          export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
           SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
-          echo "Attaching Frida to: $TARGET_APP on $SIM_UDID"
           mkdir -p reports
+          echo "Attaching Frida to: $TARGET_APP on $SIM_UDID"
+
           timeout 25 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
             -l scripts/frida-ios/ios/dump/network.js \
             -e "setTimeout(function(){ Process.terminate(); }, 18000);" \
             > reports/frida-network.txt 2>&1 || true
-          echo "--- Network hook output ---"
+          echo "--- Network hook ---"
           cat reports/frida-network.txt
 
           timeout 20 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
             -l scripts/frida-ios/ios/dump/keychain.js \
             -e "setTimeout(function(){ Process.terminate(); }, 12000);" \
             > reports/frida-keychain.txt 2>&1 || true
-          echo "--- Keychain hook output ---"
+          echo "--- Keychain hook ---"
           cat reports/frida-keychain.txt | head -30
 
           timeout 20 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
             -l scripts/frida-ios/ios/dump/nsuserdefaults.js \
             -e "setTimeout(function(){ Process.terminate(); }, 12000);" \
             > reports/frida-nsuserdefaults.txt 2>&1 || true
+          echo "--- NSUserDefaults hook ---"
+          cat reports/frida-nsuserdefaults.txt | head -30
 
       - name: Objection keychain dump
         run: |
           SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
-          objection -d "$SIM_UDID" -g "$TARGET_APP" \
+          objection -S "$SIM_UDID" -g "$TARGET_APP" \
             run "ios keychain dump" > reports/objection-keychain.txt 2>&1 || true
           cat reports/objection-keychain.txt | head -20
 
