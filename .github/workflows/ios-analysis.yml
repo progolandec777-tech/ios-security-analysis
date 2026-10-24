@@ -153,7 +153,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             SWIFT_VERSION=5 \
-            build 2>&1 | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED|warning: Swift" | tail -20 || true
+            IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            build 2>&1 | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED|warning: Swift" | tail -30 || true
           find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -3
 
       - name: Verify Frida sees simulator
@@ -169,11 +170,16 @@ jobs:
           APP_PATH=$(find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" 2>/dev/null | head -1)
           if [ -n "$APP_PATH" ]; then
             echo "Installing DVIA-v2 from: $APP_PATH"
-            xcrun simctl install "$SIM_UDID" "$APP_PATH"
-            xcrun simctl launch "$SIM_UDID" com.highaltitudehacks.DVIAswiftv2 || true
-            sleep 8
-            TARGET_APP="DVIA-v2"
-          else
+            if xcrun simctl install "$SIM_UDID" "$APP_PATH" 2>&1; then
+              xcrun simctl launch "$SIM_UDID" com.highaltitudehacks.DVIAswiftv2 || true
+              sleep 8
+              TARGET_APP="DVIA-v2"
+            else
+              echo "Install failed, falling back to MobileSafari"
+              APP_PATH=""
+            fi
+          fi
+          if [ -z "$APP_PATH" ]; then
             echo "DVIA-v2 build not found, using MobileSafari for Frida demo"
             xcrun simctl openurl "$SIM_UDID" "https://example.com" || true
             sleep 5
