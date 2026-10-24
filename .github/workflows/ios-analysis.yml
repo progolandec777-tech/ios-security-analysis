@@ -234,26 +234,36 @@ jobs:
             > reports/frida-classes.txt 2>&1 || true
           cat reports/frida-classes.txt | head -40
 
-      - name: Objection keychain dump
+      - name: Frida extra — cookies + file access + sqlite
         run: |
           export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
           SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
           BUNDLE_ID="com.highaltitudehacks.DVIAswiftv2"
           mkdir -p reports
 
-          # Запустить приложение и дать ему инициализироваться
-          xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" 2>/dev/null || true
-          sleep 4
+          # Cookies dump
+          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" \
+            -f "$BUNDLE_ID" \
+            -l scripts/frida-ios/dump/cookies.js \
+            > reports/frida-cookies.txt 2>&1 || true
+          echo "--- Cookies ---"
+          cat reports/frida-cookies.txt | head -20
 
-          # Имя процесса из frida-ps (точное совпадение)
-          PROC_NAME=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" 2>/dev/null | grep -i "DVIA\|DVIAswift" | head -1 | awk '{print $2}')
-          echo "Running processes:"
-          $FRIDA_BIN/frida-ps -D "$SIM_UDID" | head -20
-          echo "Target: ${PROC_NAME:-DVIA-v2}"
+          # File access monitoring (что читает/пишет приложение при старте)
+          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" \
+            -f "$BUNDLE_ID" \
+            -l scripts/frida-ios/dump/file-access.js \
+            > reports/frida-fileaccess.txt 2>&1 || true
+          echo "--- File access ---"
+          cat reports/frida-fileaccess.txt | head -30
 
-          timeout 30 $FRIDA_BIN/objection -D "$SIM_UDID" -n "${PROC_NAME:-DVIA-v2}" \
-            run "ios keychain dump" > reports/objection-keychain.txt 2>&1 || true
-          cat reports/objection-keychain.txt | head -30
+          # Crypto hooks
+          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" \
+            -f "$BUNDLE_ID" \
+            -l scripts/frida-ios/dump/crypto.js \
+            > reports/frida-crypto.txt 2>&1 || true
+          echo "--- Crypto ---"
+          cat reports/frida-crypto.txt | head -20
 
       - name: Upload dynamic analysis reports
         uses: actions/upload-artifact@v4
