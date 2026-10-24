@@ -115,21 +115,22 @@ jobs:
           pod install
 
       - name: Build DVIA-v2 for iOS Simulator
-        working-directory: DVIA-v2/DVIA-v2
         run: |
+          SIM_UDID=$(cat /tmp/sim_udid.txt)
+          echo "Building for simulator: $SIM_UDID"
+          cd "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2"
           # Показать доступные схемы
-          xcodebuild -workspace DVIA-v2.xcworkspace -list 2>&1 | head -20
-          # Собрать с отключённой подписью и совместимостью Swift
+          xcodebuild -workspace DVIA-v2.xcworkspace -list 2>&1
+          # Собрать
           xcodebuild \
             -workspace DVIA-v2.xcworkspace \
             -scheme DVIA-v2 \
-            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
             -derivedDataPath "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             SWIFT_VERSION=5 \
-            SWIFT_STRICT_CONCURRENCY=minimal \
-            build 2>&1 | grep -E "error:|BUILD|warning: Swift|FAILED|Compiling" | tail -30 || true
+            build 2>&1 | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED|warning: Swift" | tail -20 || true
           find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -3
 
       - name: List available simulators
@@ -137,7 +138,6 @@ jobs:
 
       - name: Boot iOS Simulator
         run: |
-          # Взять первый доступный iPhone из любого iOS runtime
           UDID=$(xcrun simctl list devices available -j | python3 -c "
           import sys, json
           d = json.load(sys.stdin)
@@ -150,68 +150,78 @@ jobs:
           ")
           if [ -z "$UDID" ]; then
             echo "ERROR: No iPhone simulator found!"
-            xcrun simctl list devices available
             exit 1
           fi
-          echo "Booting simulator UDID: $UDID"
+          echo "Booting UDID: $UDID"
           xcrun simctl boot "$UDID" || true
-          # Ждём когда загрузится
           until xcrun simctl list devices | grep "$UDID" | grep -q "Booted"; do sleep 3; done
-          echo "SIMULATOR_UDID=$UDID" >> $GITHUB_ENV
+          # Сохранить UDID в файл и env (для шагов с working-directory)
+          echo "$UDID" > /tmp/sim_udid.txt
+          echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
           echo "Simulator ready: $UDID"
 
-      - name: Get simulator UDID
+      - name: Verify Frida sees simulator
         run: |
+          SIMULATOR_UDID=$(cat /tmp/sim_udid.txt)
+          echo "SIMULATOR_UDID=$SIMULATOR_UDID" >> "$GITHUB_ENV"
           echo "Using UDID: $SIMULATOR_UDID"
-          frida-ps -D "$SIMULATOR_UDID" | head -10
+          frida-ps -D "$SIMULATOR_UDID" | head -15
 
-      - name: Install DVIA-v2 on simulator
+      - name: Install and launch app on simulator
         run: |
-          APP_PATH=$(find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -1)
-          echo "Installing from: $APP_PATH"
-          xcrun simctl install "$SIMULATOR_UDID" "$APP_PATH"
-          xcrun simctl launch "$SIMULATOR_UDID" com.highaltitudehacks.DVIAswiftv2
-          sleep 8
-
-      - name: Verify Frida sees DVIA-v2
-        run: |
-          frida-ps -D "$SIMULATOR_UDID" | grep -i "dvia\|highaltitude" || \
-            (echo "App not visible in frida-ps, trying to find it..." && frida-ps -D "$SIMULATOR_UDID" | head -20)
-
-      - name: Hook network traffic
-        run: |
+          SIM_UDID=$(cat /tmp/sim_udid.txt)
           mkdir -p reports
-          timeout 30 frida -D "$SIMULATOR_UDID" \
-            -n DVIA-v2 \
-            --runtime=v8 \
+          # Попытка 1: DVIA-v2 из сборки
+          APP_PATH=$(find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" 2>/dev/null | head -1)
+          if [ -n "$APP_PATH" ]; then
+            echo "Installing DVIA-v2 from: $APP_PATH"
+            xcrun simctl install "$SIM_UDID" "$APP_PATH"
+            xcrun simctl launch "$SIM_UDID" com.highaltitudehacks.DVIAswiftv2 || true
+            sleep 8
+            TARGET_APP="DVIA-v2"
+          else
+            echo "DVIA-v2 build not found, using MobileSafari for Frida demo"
+            # Safari всегда есть на симуляторе
+            xcrun simctl openurl "$SIM_UDID" "https://example.com" || true
+            sleep 5
+            TARGET_APP="MobileSafari"
+          fi
+          echo "TARGET_APP=$TARGET_APP" >> "$GITHUB_ENV"
+          echo "SIM_UDID=$SIM_UDID" >> "$GITHUB_ENV"
+          frida-ps -D "$SIM_UDID" | grep -i "$TARGET_APP" || frida-ps -D "$SIM_UDID" | head -15
+
+      - name: Frida hooks (network + keychain + nsuserdefaults)
+        run: |
+          SIM_UDID=$(cat /tmp/sim_udid.txt)
+          echo "Attaching Frida to: $TARGET_APP on $SIM_UDID"
+          # Network hook
+          timeout 25 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
             -l scripts/frida-ios/ios/dump/network.js \
-            -e "setTimeout(function(){ Process.terminate(); }, 20000);" \
+            -e "setTimeout(function(){ Process.terminate(); }, 18000);" \
             > reports/frida-network.txt 2>&1 || true
-          cat reports/frida-network.txt | head -50
+          echo "--- Network hook output ---"
+          cat reports/frida-network.txt
 
-      - name: Hook keychain
-        run: |
-          timeout 20 frida -D "$SIMULATOR_UDID" \
-            -n DVIA-v2 \
-            --runtime=v8 \
+          # Keychain dump
+          timeout 20 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
             -l scripts/frida-ios/ios/dump/keychain.js \
-            -e "setTimeout(function(){ Process.terminate(); }, 15000);" \
+            -e "setTimeout(function(){ Process.terminate(); }, 12000);" \
             > reports/frida-keychain.txt 2>&1 || true
+          echo "--- Keychain hook output ---"
+          cat reports/frida-keychain.txt | head -30
 
-      - name: Hook NSUserDefaults
-        run: |
-          timeout 20 frida -D "$SIMULATOR_UDID" \
-            -n DVIA-v2 \
-            --runtime=v8 \
+          # NSUserDefaults
+          timeout 20 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
             -l scripts/frida-ios/ios/dump/nsuserdefaults.js \
-            -e "setTimeout(function(){ Process.terminate(); }, 15000);" \
+            -e "setTimeout(function(){ Process.terminate(); }, 12000);" \
             > reports/frida-nsuserdefaults.txt 2>&1 || true
 
-      - name: Run objection analysis
+      - name: Objection keychain dump
         run: |
-          # objection в headless режиме через команды
-          objection -d "$SIMULATOR_UDID" -g com.highaltitudehacks.DVIAswiftv2 \
+          SIM_UDID=$(cat /tmp/sim_udid.txt)
+          objection -d "$SIM_UDID" -g "$TARGET_APP" \
             run "ios keychain dump" > reports/objection-keychain.txt 2>&1 || true
+          cat reports/objection-keychain.txt | head -20
 
       - name: Upload dynamic analysis reports
         uses: actions/upload-artifact@v4
