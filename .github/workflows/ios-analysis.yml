@@ -116,7 +116,7 @@ jobs:
 
       - name: Build DVIA-v2 for iOS Simulator
         run: |
-          SIM_UDID=$(cat /tmp/sim_udid.txt)
+          SIM_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
           echo "Building for simulator: $SIM_UDID"
           cd "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2"
           # Показать доступные схемы
@@ -156,20 +156,20 @@ jobs:
           xcrun simctl boot "$UDID" || true
           until xcrun simctl list devices | grep "$UDID" | grep -q "Booted"; do sleep 3; done
           # Сохранить UDID в файл и env (для шагов с working-directory)
-          echo "$UDID" > /tmp/sim_udid.txt
+          echo "$UDID" > $GITHUB_WORKSPACE/sim_udid.txt
           echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
           echo "Simulator ready: $UDID"
 
       - name: Verify Frida sees simulator
         run: |
-          SIMULATOR_UDID=$(cat /tmp/sim_udid.txt)
+          SIMULATOR_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
           echo "SIMULATOR_UDID=$SIMULATOR_UDID" >> "$GITHUB_ENV"
           echo "Using UDID: $SIMULATOR_UDID"
           frida-ps -D "$SIMULATOR_UDID" | head -15
 
       - name: Install and launch app on simulator
         run: |
-          SIM_UDID=$(cat /tmp/sim_udid.txt)
+          SIM_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
           mkdir -p reports
           # Попытка 1: DVIA-v2 из сборки
           APP_PATH=$(find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" 2>/dev/null | head -1)
@@ -192,7 +192,7 @@ jobs:
 
       - name: Frida hooks (network + keychain + nsuserdefaults)
         run: |
-          SIM_UDID=$(cat /tmp/sim_udid.txt)
+          SIM_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
           echo "Attaching Frida to: $TARGET_APP on $SIM_UDID"
           # Network hook
           timeout 25 frida -D "$SIM_UDID" -n "$TARGET_APP" --runtime=v8 \
@@ -218,7 +218,7 @@ jobs:
 
       - name: Objection keychain dump
         run: |
-          SIM_UDID=$(cat /tmp/sim_udid.txt)
+          SIM_UDID=$(cat $GITHUB_WORKSPACE/sim_udid.txt)
           objection -d "$SIM_UDID" -g "$TARGET_APP" \
             run "ios keychain dump" > reports/objection-keychain.txt 2>&1 || true
           cat reports/objection-keychain.txt | head -20
