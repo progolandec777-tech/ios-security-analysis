@@ -155,8 +155,9 @@ jobs:
             -scheme DVIA-v2 \
             -destination "platform=iOS Simulator,id=$SIM_UDID" \
             -derivedDataPath "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
             SWIFT_VERSION=5 \
             IPHONEOS_DEPLOYMENT_TARGET=12.0 \
             build 2>&1 | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED|warning: Swift" | tail -30 || true
@@ -220,10 +221,38 @@ jobs:
             exit 0
           fi
 
-          # Один сеанс Frida со всеми скриптами — attach к уже запущенному процессу
-          # 90 секунд: app уже работает, скрипты инжектятся мгновенно
+          # Проверяем entitlement get-task-allow
+          APP_PATH=$(find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -1)
+          echo "=== Entitlements ==="
+          codesign -d --entitlements - "$APP_PATH" 2>&1 | grep -E "get-task-allow|task_for_pid" || echo "No get-task-allow entitlement found"
+
+          # Быстрый тест инжекции через PID
+          PID=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" | grep "$PROC" | head -1 | awk '{print $1}')
+          echo "=== Test frida inject (PID $PID) ==="
+          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" -p "$PID" \
+            -e "console.log('[OK] Frida inject success, PID=' + Process.id); setTimeout(function(){}, 2000);" \
+            > reports/frida-inject-test.txt 2>&1 || true
+          cat reports/frida-inject-test.txt
+
+          # Если тест провалился — пробуем SpringBoard (системный процесс)
+          if ! grep -q "inject success" reports/frida-inject-test.txt; then
+            echo "=== DVIA-v2 inject failed, testing SpringBoard ==="
+            SB_PID=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" | grep SpringBoard | head -1 | awk '{print $1}')
+            if [ -n "$SB_PID" ]; then
+              timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" -p "$SB_PID" \
+                -e "console.log('[OK] SpringBoard inject OK, PID=' + Process.id); setTimeout(function(){}, 2000);" \
+                > reports/frida-springboard-test.txt 2>&1 || true
+              cat reports/frida-springboard-test.txt
+              PROC="SpringBoard"
+              PID="$SB_PID"
+            fi
+          fi
+
+          echo "=== Final target: $PROC (PID $PID) ==="
+
+          # Один сеанс Frida со всеми скриптами
           timeout 90 $FRIDA_BIN/frida -D "$SIM_UDID" \
-            -n "$PROC" \
+            -p "$PID" \
             -l scripts/frida-ios/auxiliary/find-app-classes.js \
             -l scripts/frida-ios/dump/keychain.js \
             -l scripts/frida-ios/dump/nsuserdefaults.js \
