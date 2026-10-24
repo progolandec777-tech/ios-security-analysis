@@ -103,21 +103,28 @@ jobs:
           python3 -m pip install frida frida-tools objection --break-system-packages 2>/dev/null || \
           pip3 install frida frida-tools objection
 
-      - name: Clone and build DVIA-v2 for Simulator
+      - name: Clone DVIA-v2 source
         run: |
-          git clone --depth 1 https://github.com/prateek147/DVIA-v2.git
-          cd DVIA-v2
-          # Установить CocoaPods зависимости
-          pod install --repo-update
-          # Собрать для симулятора (без подписи кода)
+          git clone --depth 1 https://github.com/prateek147/DVIA-v2.git "$GITHUB_WORKSPACE/DVIA-v2"
+          ls "$GITHUB_WORKSPACE/DVIA-v2/"
+
+      - name: Install CocoaPods dependencies
+        working-directory: DVIA-v2
+        run: |
+          ls -la
+          pod install
+
+      - name: Build DVIA-v2 for iOS Simulator
+        working-directory: DVIA-v2
+        run: |
           xcodebuild \
             -workspace DVIA-v2.xcworkspace \
             -scheme DVIA-v2 \
             -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
-            -derivedDataPath "$PWD/DerivedData" \
+            -derivedDataPath "$GITHUB_WORKSPACE/DVIA-v2/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
-            build 2>&1 | tail -20
-          ls DerivedData/Build/Products/Debug-iphonesimulator/
+            build 2>&1 | xcpretty || true
+          find "$GITHUB_WORKSPACE/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -3
 
       - name: List available simulators
         run: xcrun simctl list devices available
@@ -154,7 +161,7 @@ jobs:
 
       - name: Install DVIA-v2 on simulator
         run: |
-          APP_PATH=$(find DVIA-v2/DerivedData -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -1)
+          APP_PATH=$(find "$GITHUB_WORKSPACE/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -1)
           echo "Installing from: $APP_PATH"
           xcrun simctl install "$SIMULATOR_UDID" "$APP_PATH"
           xcrun simctl launch "$SIMULATOR_UDID" com.highaltitudehacks.DVIAswiftv2
