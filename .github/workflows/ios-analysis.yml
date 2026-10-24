@@ -106,7 +106,7 @@ jobs:
           /tmp/frida-venv/bin/pip install -q frida frida-tools objection
           echo "FRIDA_BIN=/tmp/frida-venv/bin" >> "$GITHUB_ENV"
           /tmp/frida-venv/bin/frida --version
-          /tmp/frida-venv/bin/objection --version
+          /tmp/frida-venv/bin/pip show objection | grep Version
 
       - name: Boot iOS Simulator
         run: |
