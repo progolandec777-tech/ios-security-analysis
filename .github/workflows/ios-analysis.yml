@@ -193,77 +193,54 @@ jobs:
           echo "TARGET_APP=$TARGET_APP" >> "$GITHUB_ENV"
           $FRIDA_BIN/frida-ps -D "$SIM_UDID" | grep -i "$TARGET_APP" || $FRIDA_BIN/frida-ps -D "$SIM_UDID" | head -15
 
-      - name: Frida hooks (network + keychain + nsuserdefaults)
+      - name: Frida dynamic analysis
         run: |
           export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
           SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
           BUNDLE_ID="com.highaltitudehacks.DVIAswiftv2"
           mkdir -p reports
 
-          echo "=== Frida version: $($FRIDA_BIN/frida --version) ==="
+          echo "Frida $($FRIDA_BIN/frida --version) on simulator $SIM_UDID"
 
-          # 1. Keychain dump (active read via SecItemCopyMatching, works without UI)
-          echo "--- Keychain dump (spawn) ---"
-          timeout 20 $FRIDA_BIN/frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" \
-            -l scripts/frida-ios/dump/keychain.js \
-            > reports/frida-keychain.txt 2>&1 || true
-          cat reports/frida-keychain.txt | head -30
+          # Убедиться что приложение запущено и дать ему инициализироваться
+          xcrun simctl terminate "$SIM_UDID" "$BUNDLE_ID" 2>/dev/null || true
+          xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" 2>/dev/null || true
 
-          # 2. Network hooks — catches init-time requests on spawn
-          echo "--- Network hook (spawn) ---"
-          timeout 20 $FRIDA_BIN/frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" \
-            -l scripts/frida-ios/dump/network.js \
-            > reports/frida-network.txt 2>&1 || true
-          cat reports/frida-network.txt
+          # Ждём пока frida видит процесс (до 30 сек)
+          for i in $(seq 1 15); do
+            PROC=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" 2>/dev/null | grep -i "DVIA\|DVIAswift" | head -1 | awk '{print $2}')
+            [ -n "$PROC" ] && break
+            sleep 2
+          done
+          echo "Target process: ${PROC:-not found}"
+          $FRIDA_BIN/frida-ps -D "$SIM_UDID" | head -20
 
-          # 3. NSUserDefaults
-          echo "--- NSUserDefaults hook (spawn) ---"
-          timeout 20 $FRIDA_BIN/frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" \
-            -l scripts/frida-ios/dump/nsuserdefaults.js \
-            > reports/frida-nsuserdefaults.txt 2>&1 || true
-          cat reports/frida-nsuserdefaults.txt | head -30
+          if [ -z "$PROC" ]; then
+            echo "DVIA-v2 not found in frida-ps, aborting Frida hooks"
+            exit 0
+          fi
 
-          # 4. Class list — always produces output, proves Frida is working
-          echo "--- App classes (spawn) ---"
-          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" \
+          # Один сеанс Frida со всеми скриптами — attach к уже запущенному процессу
+          # 90 секунд: app уже работает, скрипты инжектятся мгновенно
+          timeout 90 $FRIDA_BIN/frida -D "$SIM_UDID" \
+            -n "$PROC" \
             -l scripts/frida-ios/auxiliary/find-app-classes.js \
-            > reports/frida-classes.txt 2>&1 || true
-          cat reports/frida-classes.txt | head -40
-
-      - name: Frida extra — cookies + file access + sqlite
-        run: |
-          export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
-          SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
-          BUNDLE_ID="com.highaltitudehacks.DVIAswiftv2"
-          mkdir -p reports
-
-          # Cookies dump
-          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" \
+            -l scripts/frida-ios/dump/keychain.js \
+            -l scripts/frida-ios/dump/nsuserdefaults.js \
             -l scripts/frida-ios/dump/cookies.js \
-            > reports/frida-cookies.txt 2>&1 || true
-          echo "--- Cookies ---"
-          cat reports/frida-cookies.txt | head -20
-
-          # File access monitoring (что читает/пишет приложение при старте)
-          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" \
+            -l scripts/frida-ios/dump/network.js \
             -l scripts/frida-ios/dump/file-access.js \
-            > reports/frida-fileaccess.txt 2>&1 || true
-          echo "--- File access ---"
-          cat reports/frida-fileaccess.txt | head -30
+            > reports/frida-full.txt 2>&1 || true
 
-          # Crypto hooks
-          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" \
-            -l scripts/frida-ios/dump/crypto.js \
-            > reports/frida-crypto.txt 2>&1 || true
-          echo "--- Crypto ---"
-          cat reports/frida-crypto.txt | head -20
+          echo "=== Frida output (первые 80 строк) ==="
+          head -80 reports/frida-full.txt
+
+          # Разбить на отдельные файлы для удобства
+          grep "MBSFDUMP.*keychain\|Dumping.*Keychain" reports/frida-full.txt > reports/frida-keychain.txt || true
+          grep "MBSFDUMP.*network\|NSURLSession\|NSURLRequest" reports/frida-full.txt > reports/frida-network.txt || true
+          grep "MBSFDUMP.*nsuserdefaults\|NSUserDefaults" reports/frida-full.txt > reports/frida-nsuserdefaults.txt || true
+          grep "AUXILIARY\|Total app-owned" reports/frida-full.txt > reports/frida-classes.txt || true
+          wc -l reports/frida-*.txt
 
       - name: Upload dynamic analysis reports
         uses: actions/upload-artifact@v4
