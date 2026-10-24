@@ -203,56 +203,38 @@ jobs:
 
           echo "Frida $($FRIDA_BIN/frida --version) on simulator $SIM_UDID"
 
-          # Убедиться что приложение запущено и дать ему инициализироваться
+          # Запустить DVIA-v2 и проверить что он выжил (не упал)
           xcrun simctl terminate "$SIM_UDID" "$BUNDLE_ID" 2>/dev/null || true
           xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" 2>/dev/null || true
+          sleep 6
 
-          # Ждём пока frida видит процесс (до 30 сек)
-          for i in $(seq 1 15); do
-            PROC=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" 2>/dev/null | grep -i "DVIA\|DVIAswift" | head -1 | awk '{print $2}')
-            [ -n "$PROC" ] && break
-            sleep 2
-          done
-          echo "Target process: ${PROC:-not found}"
+          DVIA_PID=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" 2>/dev/null | grep -i "DVIA\|DVIAswift" | head -1 | awk '{print $1}')
+          echo "DVIA-v2 PID after 6s: ${DVIA_PID:-CRASHED}"
+
+          # Если DVIA-v2 упал — открыть Safari с URL (будет сетевой трафик)
+          if [ -z "$DVIA_PID" ]; then
+            echo "DVIA-v2 crashed, using MobileSafari for Frida hooks"
+            xcrun simctl openurl "$SIM_UDID" "https://example.com" 2>/dev/null || true
+            sleep 5
+            TARGET_PID=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" 2>/dev/null | grep -i "Safari\|MobileSafari" | head -1 | awk '{print $1}')
+            TARGET_NAME="MobileSafari"
+          else
+            TARGET_PID="$DVIA_PID"
+            TARGET_NAME="DVIA-v2"
+          fi
+
+          echo "All running processes:"
           $FRIDA_BIN/frida-ps -D "$SIM_UDID" | head -20
 
-          if [ -z "$PROC" ]; then
-            echo "DVIA-v2 not found in frida-ps, aborting Frida hooks"
+          if [ -z "$TARGET_PID" ]; then
+            echo "No attachable process found"
             exit 0
           fi
-
-          # Проверяем entitlement get-task-allow
-          APP_PATH=$(find "$GITHUB_WORKSPACE/DVIA-v2/DVIA-v2/DerivedData" -name "DVIA-v2.app" -not -path "*/dSYM/*" | head -1)
-          echo "=== Entitlements ==="
-          codesign -d --entitlements - "$APP_PATH" 2>&1 | grep -E "get-task-allow|task_for_pid" || echo "No get-task-allow entitlement found"
-
-          # Быстрый тест инжекции через PID
-          PID=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" | grep "$PROC" | head -1 | awk '{print $1}')
-          echo "=== Test frida inject (PID $PID) ==="
-          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" -p "$PID" \
-            -e "console.log('[OK] Frida inject success, PID=' + Process.id); setTimeout(function(){}, 2000);" \
-            > reports/frida-inject-test.txt 2>&1 || true
-          cat reports/frida-inject-test.txt
-
-          # Если тест провалился — пробуем SpringBoard (системный процесс)
-          if ! grep -q "inject success" reports/frida-inject-test.txt; then
-            echo "=== DVIA-v2 inject failed, testing SpringBoard ==="
-            SB_PID=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" | grep SpringBoard | head -1 | awk '{print $1}')
-            if [ -n "$SB_PID" ]; then
-              timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" -p "$SB_PID" \
-                -e "console.log('[OK] SpringBoard inject OK, PID=' + Process.id); setTimeout(function(){}, 2000);" \
-                > reports/frida-springboard-test.txt 2>&1 || true
-              cat reports/frida-springboard-test.txt
-              PROC="SpringBoard"
-              PID="$SB_PID"
-            fi
-          fi
-
-          echo "=== Final target: $PROC (PID $PID) ==="
+          echo "=== Target: $TARGET_NAME (PID $TARGET_PID) ==="
 
           # Один сеанс Frida со всеми скриптами
           timeout 90 $FRIDA_BIN/frida -D "$SIM_UDID" \
-            -p "$PID" \
+            -p "$TARGET_PID" \
             -l scripts/frida-ios/auxiliary/find-app-classes.js \
             -l scripts/frida-ios/dump/keychain.js \
             -l scripts/frida-ios/dump/nsuserdefaults.js \
