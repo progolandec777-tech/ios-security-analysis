@@ -1,0 +1,205 @@
+name: iOS Full Security Analysis
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: "URL to IPA file (optional, defaults to DVIA-v2)"
+        required: false
+        default: "https://github.com/prateek147/DVIA-v2/releases/download/v2.0/DVIA-v2-swift.ipa"
+
+jobs:
+  static-analysis:
+    name: "Static Analysis (MobSF)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download IPA
+        run: |
+          IPA_URL="${{ github.event.inputs.ipa_url || 'https://github.com/prateek147/DVIA-v2/releases/download/v2.0/DVIA-v2-swift.ipa' }}"
+          curl -L -o app.ipa "$IPA_URL"
+          ls -lh app.ipa
+
+      - name: Start MobSF
+        run: |
+          docker run -d --name mobsf -p 8000:8000 \
+            opensecurity/mobile-security-framework-mobsf:latest
+          until curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/ | grep -q "200\|302"; do sleep 3; done
+
+      - name: Get MobSF API key
+        run: |
+          MOBSF_API_KEY=$(docker exec mobsf python3 -c "
+          import os, sys
+          sys.path.insert(0, '/home/mobsf/Mobile-Security-Framework-MobSF')
+          os.environ['MOBSF_HOME'] = '/home/mobsf/.MobSF'
+          from mobsf.MobSF.init import api_key
+          print(api_key('/home/mobsf/.MobSF'))
+          " 2>/dev/null)
+          echo "MOBSF_API_KEY=$MOBSF_API_KEY" >> $GITHUB_ENV
+
+      - name: Upload & Scan IPA
+        run: |
+          UPLOAD=$(curl -s -F "file=@app.ipa" \
+            -H "Authorization: $MOBSF_API_KEY" \
+            http://localhost:8000/api/v1/upload)
+          HASH=$(echo "$UPLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin)['hash'])")
+          echo "SCAN_HASH=$HASH" >> $GITHUB_ENV
+
+          curl -s -X POST http://localhost:8000/api/v1/scan \
+            -H "Authorization: $MOBSF_API_KEY" \
+            -d "hash=$HASH&scan_type=ipa&file_name=app.ipa&re_scan=0" > /dev/null
+          echo "Scan complete, hash: $HASH"
+
+      - name: Download Reports
+        run: |
+          mkdir -p reports
+          # JSON report
+          curl -s -X POST http://localhost:8000/api/v1/report_json \
+            -H "Authorization: $MOBSF_API_KEY" \
+            -d "hash=$SCAN_HASH" > reports/mobsf-static.json
+          # PDF report
+          curl -s -X POST http://localhost:8000/api/v1/download_pdf \
+            -H "Authorization: $MOBSF_API_KEY" \
+            -d "hash=$SCAN_HASH" -o reports/mobsf-static.pdf
+          ls -lh reports/
+
+      - name: Parse findings
+        run: |
+          python3 - << 'EOF'
+          import json
+          with open('reports/mobsf-static.json') as f:
+              d = json.load(f)
+          print("=== MobSF Static Analysis ===")
+          print(f"App: {d.get('app_name')} v{d.get('app_version')}")
+          ats = d.get('ats_analysis', {}).get('ats_findings', [])
+          for f in ats:
+              print(f"[{f['severity'].upper()}] ATS: {f['issue']}")
+          ba = d.get('binary_analysis', {}).get('findings', {})
+          for name, det in ba.items():
+              print(f"[{det.get('severity','?').upper()}] {name}")
+          print(f"URLs found: {len(d.get('urls', []))}")
+          EOF
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-analysis-reports
+          path: reports/
+
+  dynamic-analysis:
+    name: "Dynamic Analysis (Frida + iOS Simulator)"
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Xcode CLT
+        run: xcode-select --install 2>/dev/null || true
+
+      - name: Install Frida & tools
+        run: |
+          python3 -m pip install frida frida-tools objection --break-system-packages 2>/dev/null || \
+          pip3 install frida frida-tools objection
+
+      - name: Download DVIA-v2 IPA
+        run: |
+          IPA_URL="${{ github.event.inputs.ipa_url || 'https://github.com/prateek147/DVIA-v2/releases/download/v2.0/DVIA-v2-swift.ipa' }}"
+          curl -L -o DVIA-v2.ipa "$IPA_URL"
+
+      - name: Boot iOS Simulator
+        uses: futureware-tech/simulator-action@v3
+        with:
+          model: "iPhone 15"
+          os: iOS
+          os_version: ">=17"
+          erase_before_boot: true
+
+      - name: Get simulator UDID
+        run: |
+          UDID=$(xcrun simctl list devices | grep Booted | grep -oE '[A-F0-9-]{36}' | head -1)
+          echo "SIMULATOR_UDID=$UDID" >> $GITHUB_ENV
+          echo "Simulator UDID: $UDID"
+          frida-ps -D "$UDID" | head -10
+
+      - name: Install DVIA-v2 on simulator
+        run: |
+          xcrun simctl install "$SIMULATOR_UDID" DVIA-v2.ipa
+          xcrun simctl launch "$SIMULATOR_UDID" com.highaltitudehacks.DVIAswiftv2 || true
+          sleep 5
+
+      - name: Verify Frida sees DVIA-v2
+        run: |
+          frida-ps -D "$SIMULATOR_UDID" | grep -i "dvia\|highaltitude" || \
+            (echo "App not visible in frida-ps, trying to find it..." && frida-ps -D "$SIMULATOR_UDID" | head -20)
+
+      - name: Hook network traffic
+        run: |
+          mkdir -p reports
+          timeout 30 frida -D "$SIMULATOR_UDID" \
+            -n DVIA-v2 \
+            --runtime=v8 \
+            -l scripts/frida-ios/ios/dump/network.js \
+            -e "setTimeout(function(){ Process.terminate(); }, 20000);" \
+            > reports/frida-network.txt 2>&1 || true
+          cat reports/frida-network.txt | head -50
+
+      - name: Hook keychain
+        run: |
+          timeout 20 frida -D "$SIMULATOR_UDID" \
+            -n DVIA-v2 \
+            --runtime=v8 \
+            -l scripts/frida-ios/ios/dump/keychain.js \
+            -e "setTimeout(function(){ Process.terminate(); }, 15000);" \
+            > reports/frida-keychain.txt 2>&1 || true
+
+      - name: Hook NSUserDefaults
+        run: |
+          timeout 20 frida -D "$SIMULATOR_UDID" \
+            -n DVIA-v2 \
+            --runtime=v8 \
+            -l scripts/frida-ios/ios/dump/nsuserdefaults.js \
+            -e "setTimeout(function(){ Process.terminate(); }, 15000);" \
+            > reports/frida-nsuserdefaults.txt 2>&1 || true
+
+      - name: Run objection analysis
+        run: |
+          # objection в headless режиме через команды
+          objection -d "$SIMULATOR_UDID" -g com.highaltitudehacks.DVIAswiftv2 \
+            run "ios keychain dump" > reports/objection-keychain.txt 2>&1 || true
+
+      - name: Upload dynamic analysis reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: dynamic-analysis-reports
+          path: reports/
+
+  semgrep-analysis:
+    name: "Code Analysis (Semgrep)"
+    runs-on: ubuntu-latest
+    # Запускается если есть исходники Swift/ObjC в репозитории
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract IPA sources (if available)
+        run: |
+          curl -L -o app.ipa \
+            "https://github.com/prateek147/DVIA-v2/releases/download/v2.0/DVIA-v2-swift.ipa"
+          mkdir -p extracted
+          unzip -q app.ipa -d extracted/ || true
+          find extracted/ -name "*.swift" -o -name "*.m" | head -5
+
+      - uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/swift
+            p/owasp-top-ten
+          generateSarif: "1"
+        continue-on-error: true
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+        continue-on-error: true
