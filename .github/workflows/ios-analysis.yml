@@ -101,8 +101,12 @@ jobs:
       - name: Install Frida & tools
         run: |
           brew install coreutils
-          python3 -m pip install frida frida-tools objection --break-system-packages 2>/dev/null || \
-          pip3 install frida frida-tools objection
+          # venv чтобы все инструменты использовали одну версию frida
+          python3 -m venv /tmp/frida-venv
+          /tmp/frida-venv/bin/pip install -q frida frida-tools objection
+          echo "FRIDA_BIN=/tmp/frida-venv/bin" >> "$GITHUB_ENV"
+          /tmp/frida-venv/bin/frida --version
+          /tmp/frida-venv/bin/objection --version
 
       - name: Boot iOS Simulator
         run: |
@@ -162,7 +166,7 @@ jobs:
         run: |
           SIM_UDID=$(cat "$GITHUB_WORKSPACE/sim_udid.txt")
           echo "Using UDID: $SIM_UDID"
-          frida-ps -D "$SIM_UDID" | head -15
+          $FRIDA_BIN/frida-ps -D "$SIM_UDID" | head -15
 
       - name: Install and launch app on simulator
         run: |
@@ -187,7 +191,7 @@ jobs:
             TARGET_APP="MobileSafari"
           fi
           echo "TARGET_APP=$TARGET_APP" >> "$GITHUB_ENV"
-          frida-ps -D "$SIM_UDID" | grep -i "$TARGET_APP" || frida-ps -D "$SIM_UDID" | head -15
+          $FRIDA_BIN/frida-ps -D "$SIM_UDID" | grep -i "$TARGET_APP" || $FRIDA_BIN/frida-ps -D "$SIM_UDID" | head -15
 
       - name: Frida hooks (network + keychain + nsuserdefaults)
         run: |
@@ -196,37 +200,36 @@ jobs:
           BUNDLE_ID="com.highaltitudehacks.DVIAswiftv2"
           mkdir -p reports
 
-          echo "=== Frida version ==="
-          frida --version
+          echo "=== Frida version: $($FRIDA_BIN/frida --version) ==="
 
-          # 1. Spawn app + dump keychain (active read, no hooks needed)
+          # 1. Keychain dump (active read via SecItemCopyMatching, works without UI)
           echo "--- Keychain dump (spawn) ---"
-          timeout 20 frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" --no-pause \
+          timeout 20 $FRIDA_BIN/frida -D "$SIM_UDID" \
+            -f "$BUNDLE_ID" \
             -l scripts/frida-ios/dump/keychain.js \
             > reports/frida-keychain.txt 2>&1 || true
           cat reports/frida-keychain.txt | head -30
 
-          # 2. Spawn app + network hooks (catches init-time requests)
+          # 2. Network hooks — catches init-time requests on spawn
           echo "--- Network hook (spawn) ---"
-          timeout 20 frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" --no-pause \
+          timeout 20 $FRIDA_BIN/frida -D "$SIM_UDID" \
+            -f "$BUNDLE_ID" \
             -l scripts/frida-ios/dump/network.js \
             > reports/frida-network.txt 2>&1 || true
           cat reports/frida-network.txt
 
-          # 3. NSUserDefaults dump
+          # 3. NSUserDefaults
           echo "--- NSUserDefaults hook (spawn) ---"
-          timeout 20 frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" --no-pause \
+          timeout 20 $FRIDA_BIN/frida -D "$SIM_UDID" \
+            -f "$BUNDLE_ID" \
             -l scripts/frida-ios/dump/nsuserdefaults.js \
             > reports/frida-nsuserdefaults.txt 2>&1 || true
           cat reports/frida-nsuserdefaults.txt | head -30
 
-          # 4. Class trace - всегда даёт вывод, доказывает что Frida работает
-          echo "--- Class list (spawn) ---"
-          timeout 15 frida -D "$SIM_UDID" \
-            -f "$BUNDLE_ID" --no-pause \
+          # 4. Class list — always produces output, proves Frida is working
+          echo "--- App classes (spawn) ---"
+          timeout 15 $FRIDA_BIN/frida -D "$SIM_UDID" \
+            -f "$BUNDLE_ID" \
             -l scripts/frida-ios/auxiliary/find-app-classes.js \
             > reports/frida-classes.txt 2>&1 || true
           cat reports/frida-classes.txt | head -40
@@ -238,15 +241,17 @@ jobs:
           BUNDLE_ID="com.highaltitudehacks.DVIAswiftv2"
           mkdir -p reports
 
-          # Запустить app перед objection
+          # Запустить приложение и дать ему инициализироваться
           xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" 2>/dev/null || true
           sleep 4
 
-          # Получить имя процесса через frida-ps
-          PROC_NAME=$(frida-ps -D "$SIM_UDID" 2>/dev/null | grep -i "DVIA\|DVIAswift" | head -1 | awk '{print $2}')
-          echo "Process name: ${PROC_NAME:-DVIA-v2}"
+          # Имя процесса из frida-ps (точное совпадение)
+          PROC_NAME=$($FRIDA_BIN/frida-ps -D "$SIM_UDID" 2>/dev/null | grep -i "DVIA\|DVIAswift" | head -1 | awk '{print $2}')
+          echo "Running processes:"
+          $FRIDA_BIN/frida-ps -D "$SIM_UDID" | head -20
+          echo "Target: ${PROC_NAME:-DVIA-v2}"
 
-          timeout 30 objection -S "$SIM_UDID" -n "${PROC_NAME:-DVIA-v2}" \
+          timeout 30 $FRIDA_BIN/objection -D "$SIM_UDID" -n "${PROC_NAME:-DVIA-v2}" \
             run "ios keychain dump" > reports/objection-keychain.txt 2>&1 || true
           cat reports/objection-keychain.txt | head -30
 
